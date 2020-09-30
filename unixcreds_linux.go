@@ -18,6 +18,7 @@ package ttrpc
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"syscall"
@@ -85,6 +86,57 @@ func UnixSocketRequireRoot() UnixCredentialsFunc {
 func UnixSocketRequireSameUser() UnixCredentialsFunc {
 	euid, egid := os.Geteuid(), os.Getegid()
 	return UnixSocketRequireUidGid(euid, egid)
+}
+
+func UnixSocketRequireSameNamespace(ns int) UnixCredentialsFunc {
+	return func(ucred *unix.Ucred) error {
+		parent, err := getNamespace(os.Getpid(), ns)
+		if err != nil {
+			return err
+		}
+		caller, err := getNamespace(int(ucred.Pid), ns)
+		if err != nil {
+			return err
+		}
+		if parent != caller {
+			return errors.Wrap(syscall.EPERM, "ttrpc: invalid credentials")
+		}
+		return nil
+	}
+}
+
+func MultiCredentialsFunc(creds ...UnixCredentialsFunc) UnixCredentialsFunc {
+	return func(ucred *unix.Ucred) error {
+		for _, fn := range creds {
+			if err := fn(ucred); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+func getNamespace(pid int, ns int) (string, error) {
+	var name string
+	switch ns {
+	case unix.CLONE_NEWNET:
+		name = "net"
+	case unix.CLONE_NEWNS:
+		name = "mnt"
+	case unix.CLONE_NEWPID:
+		name = "pid"
+	case unix.CLONE_NEWUSER:
+		name = "user"
+	case unix.CLONE_NEWUTS:
+		name = "uts"
+	case unix.CLONE_NEWCGROUP:
+		name = "cgroup"
+	case unix.CLONE_NEWIPC:
+		name = "ipc"
+	default:
+		return "", errors.Errorf("unknown namespace %d", ns)
+	}
+	return os.Readlink(fmt.Sprintf("/proc/%d/ns/%s", pid, name))
 }
 
 func requireRoot(ucred *unix.Ucred) error {
